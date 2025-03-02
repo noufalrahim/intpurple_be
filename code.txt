@@ -1,0 +1,151 @@
+import requests
+from django.utils.timezone import now
+from django.http import JsonResponse
+from rest_framework.decorators import api_view
+from .models import PageSpeedResult
+import googlemaps
+from googleapiclient.discovery import build
+
+# API Keys (Replace with your own)
+GOOGLE_API_KEY = "AIzaSyBhfX5UMG1c1zEQ18-IeRChfZDjW3s4By0"
+GOOGLE_CSE_ID = "01426446988ec4c8e"
+GOOGLE_MAPS_API_KEY = "AIzaSyAu5P7u4qE72xFK05Woww4bO7jOXh1Zy_g"
+
+# Google Maps Client
+gmaps_client = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
+
+# Google Search API Client
+search_service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
+
+# Function to fetch Google PageSpeed Insights
+@api_view(['GET'])
+def fetch_pagespeed_results(request):
+    url = request.GET.get("url")
+    if not url:
+        return JsonResponse({"error": "URL parameter is required"}, status=400)
+
+    api_url = f"https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url={url}&key={GOOGLE_API_KEY}"
+
+    try:
+        response = requests.get(api_url)
+        data = response.json()
+
+        # Extract necessary data
+        crux_metrics = {
+            "Cumulative Layout Shift Score": data.get("loadingExperience", {}).get("metrics", {}).get("CUMULATIVE_LAYOUT_SHIFT_SCORE", {}).get("category", "N/A"),
+            "First Contentful Paint": data.get("loadingExperience", {}).get("metrics", {}).get("FIRST_CONTENTFUL_PAINT_MS", {}).get("category", "N/A"),
+        }
+
+        lighthouse = data.get("lighthouseResult", {})
+        lighthouse_metrics = {
+            "Timing": lighthouse.get("timing", {}).get("total", "N/A"),
+            "Total Blocking Time": lighthouse.get("audits", {}).get("total-blocking-time", {}).get("displayValue", "N/A"),
+            "First Contentful Paint": lighthouse.get("audits", {}).get("first-contentful-paint", {}).get("displayValue", "N/A"),
+            "Speed Index": lighthouse.get("audits", {}).get("speed-index", {}).get("displayValue", "N/A"),
+            "Time To Interactive": lighthouse.get("audits", {}).get("interactive", {}).get("displayValue", "N/A"),
+            "First Meaningful Paint": lighthouse.get("audits", {}).get("first-meaningful-paint", {}).get("displayValue", "N/A"),
+        }
+
+        screenshot = lighthouse.get("fullPageScreenshot", {}).get("screenshot", {}).get("data", None)
+
+        # Save to database
+        search_result = PageSpeedResult.objects.create(
+            url=url,
+            cumulative_layout_shift=crux_metrics["Cumulative Layout Shift Score"],
+            first_contentful_paint=crux_metrics["First Contentful Paint"],
+            timing=lighthouse_metrics["Timing"],
+            total_blocking_time=lighthouse_metrics["Total Blocking Time"],
+            speed_index=lighthouse_metrics["Speed Index"],
+            time_to_interactive=lighthouse_metrics["Time To Interactive"],
+            first_meaningful_paint=lighthouse_metrics["First Meaningful Paint"],
+            screenshot=screenshot,
+        )
+
+        return JsonResponse({
+            "message": "Result saved!",
+            "data": {
+                "url": url,
+                "timestamp": search_result.timestamp,
+                **crux_metrics,
+                **lighthouse_metrics,
+                "screenshot": bool(screenshot)  # Indicate if screenshot is stored
+            }
+        })
+
+    except requests.RequestException as e:
+        return JsonResponse({"error": "Failed to fetch API data", "details": str(e)}, status=500)
+
+# Fetch past PageSpeed results
+@api_view(['GET'])
+def get_past_searches(request):
+    searches = PageSpeedResult.objects.all().order_by('-timestamp')
+    results = [
+        {
+            "url": search.url,
+            "timestamp": search.timestamp,
+            "Cumulative Layout Shift Score": search.cumulative_layout_shift,
+            "First Contentful Paint": search.first_contentful_paint,
+            "Timing": search.timing,
+            "Total Blocking Time": search.total_blocking_time,
+            "Speed Index": search.speed_index,
+            "Time To Interactive": search.time_to_interactive,
+            "First Meaningful Paint": search.first_meaningful_paint,
+            "screenshot_available": bool(search.screenshot)  # Indicate if screenshot exists
+        }
+        for search in searches
+    ]
+    return JsonResponse({"past_searches": results})
+
+# Google Maps Search API
+@api_view(['GET'])
+def google_maps_search(request):
+    query = request.GET.get("query")
+    if not query:
+        return JsonResponse({"error": "Query parameter is required"}, status=400)
+
+    try:
+        places = gmaps_client.places(query=query)
+        return JsonResponse(places)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+# Google Custom Search API
+@api_view(['GET'])
+def google_custom_search(request):
+    query = request.GET.get("query")
+    if not query:
+        return JsonResponse({"error": "Query parameter is required"}, status=400)
+
+    try:
+        search_results = search_service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=10).execute()
+        return JsonResponse({"results": search_results.get("items", [])})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+# Google My Business Search API (If applicable)
+@api_view(['GET'])
+def google_my_business_search(request):
+    query = request.GET.get("query")
+    if not query:
+        return JsonResponse({"error": "Query parameter is required"}, status=400)
+
+    try:
+        places = gmaps_client.places(query=query, type="establishment")
+        return JsonResponse({"business_results": places.get("results", [])})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+# Website Availability Check
+@api_view(['GET'])
+def website_status(request):
+    url = request.GET.get("url")
+    if not url:
+        return JsonResponse({"error": "URL parameter is required"}, status=400)
+
+    try:
+        response = requests.head(url, timeout=5)
+        status = response.status_code == 200
+        return JsonResponse({"url": url, "available": status})
+    except requests.RequestException:
+        return JsonResponse({"url": url, "available": False})
+
