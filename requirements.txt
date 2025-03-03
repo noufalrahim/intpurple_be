@@ -1,0 +1,6 @@
+Django
+google-api-python-client
+googlemaps
+requests
+djangorestframework
+django-cors-headers
