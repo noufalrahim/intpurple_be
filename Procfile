@@ -1,0 +1,1 @@
+web: gunicorn intpurple_be.wsgi:application
